@@ -1,228 +1,96 @@
-# FilaMan - Filament Management System
+# FilaMan-System-ESP32 — ACE Pro Hybrid Fork
 
-⚠️ **Important: Starting with v3.0.0, this system requires the [FilaMan-System](https://github.com/Fire-Devils/filaman-system) backend. Previous direct integrations (Spoolman, MQTT, Bambu Lab) have been moved to the central FilaMan-System.**
+This is a fork of [Fire-Devils/FilaMan-System-ESP32](https://github.com/Fire-Devils/FilaMan-System-ESP32)
+(the ESP32 scale/NFC firmware for the [FilaMan](https://github.com/Fire-Devils/filaman-system)
+filament management system) that adds **Anycubic ACE Pro NFC tag support**.
 
-FilaMan is a filament management tool for 3D printing. It uses ESP32 hardware for weight measurement and NFC tag management.
-Users can manage filament spools and configure the device via a web interface.
-The system integrates seamlessly with the [FilaMan-System](https://github.com/Fire-Devils/filaman-system).
+Tags written by this firmware are **dual-format**: a single NTAG215 carries both
+the Anycubic ACE Pro binary format *and* an OpenSpool-compatible NDEF record —
+so the same spool is recognized natively by the ACE Pro, by Bambu-Lab-style
+OpenSpool readers and by the FilaMan scale itself.
 
-**NEW since 3.3.1:** A reduced version w/o scale is also available. Details can be found in [NFC-only mode](docs/NFC-only_mode_en.md).
+## Quick start: how to write an ACE Pro (hybrid) tag
 
-![Scale](./img/scale_trans.png)
+> **TL;DR — three steps, then every tag you write is ACE Pro compatible:**
 
+1. **Flash this firmware** on the FilaMan scale
+   ([Releases](../../releases) → `upgrade_filaman_firmware_acepro_*.bin` via the scale's web UI).
+2. **Enable hybrid mode once** — just open this URL in any browser
+   (stored in flash, survives reboots):
 
-More Images can be found in the [img Folder](/img/)
-or my website: [FilaMan Website](https://www.filaman.app)
-german explanatory video: [Youtube](https://youtu.be/uNDe2wh9SS8?si=b-jYx4I1w62zaOHU)
-Discord Server: [https://discord.gg/my7Gvaxj2v](https://discord.gg/my7Gvaxj2v)
+   | Action | URL | Response |
+   |---|---|---|
+   | Enable | `http://<scale-ip>/api/acepro?enabled=1` | `{"hybrid": true}` |
+   | Disable | `http://<scale-ip>/api/acepro?enabled=0` | `{"hybrid": false}` |
+   | Status | `http://<scale-ip>/api/acepro` | current state |
+3. **Write the tag from FilaMan as usual:** open the spool → *Write RFID tag* →
+   pick the scale device → hold the tag to the reader. That's it — the result
+   is a dual-format tag (ACE Pro + OpenSpool NDEF + FilaMan spool id).
 
-## NEW: Recycling Fabrik
+**Requirements & tips**
 
-<a href="https://www.recyclingfabrik.com" target="_blank">
-    <img src="img/rf-logo.png" alt="Recycling Fabrik" width="200">
-</a>
+- Use **NTAG215** tags (NTAG213 is too small for the dual format).
+- Spools used in an ACE Pro need a tag on **both sides** (one reader per
+  slot pair) — simply flip the spool and write again.
+- Verify what's on a tag: `GET http://<scale-ip>/api/dump` (hex dump, pages 0–45).
+- If the ACE shows a previously failed tag as unreadable even after a rewrite:
+  **power-cycle the ACE** — it caches the RFID state per tag UID.
+- One-off hybrid write without the global toggle: include `"format":"acepro"`
+  in the write payload.
 
-FilaMan is supported by [Recycling Fabrik](https://www.recyclingfabrik.com).
-Recycling Fabrik will soon offer a FilaMan-compatible NFC tag on their spools. This has the advantage
-that the spools can be automatically recognized and imported into the FilaMan-System directly via the FilaMan scale.
+## What this fork adds
 
-**What is Recycling Fabrik?**
+- **Hybrid tag writing** (`nfc_acepro.cpp/h`): ACE Pro binary format on
+  pages 4–34 (magic `7B 00 65 00`, SKU, brand, material, color, temps),
+  FilaMan spool id on pages 35–39, OpenSpool NDEF from page 40
+- **Hybrid tag reading**: fast path and full read auto-detect the format and
+  locate the NDEF record accordingly
+- **Persistent hybrid mode**: `GET /api/acepro?enabled=1` — when enabled, every
+  regular write job from the FilaMan UI produces a hybrid tag (no backend
+  changes required); alternatively send `"format":"acepro"` in the write payload
+- **Diagnostic endpoint**: `GET /api/dump` returns a raw hex dump of tag
+  pages 0–45 (invaluable for debugging tag issues)
+- **Robustness fixes**: full user-area wipe before each write, zero-initialized
+  tag structs (garbage bytes make the ACE reject a tag), tag-presence retry,
+  scan-path-consistent UID reporting
+- **SKU scheme** `VENDOR-MATERIAL-SPOOLID` (e.g. `ESUN-PLA-1`): the trailing
+  segment carries the FilaMan spool id, which downstream integrations
+  (e.g. Klipper/ACE panel live sync) can resolve back to real spool data
 
-Recycling Fabrik is a German company dedicated to developing and manufacturing sustainable 3D printing filament.
-Their filaments are made from 100% recycled material from both end customers and industry – for an environmentally conscious and resource-saving future.
+The reverse-engineered tag format — including empirically verified findings on
+what the ACE Pro firmware actually reads, validates and ignores — is documented
+in [`docs/acepro_specification.md`](docs/acepro_specification.md).
 
-More information and products can be found here: [www.recyclingfabrik.com](https://www.recyclingfabrik.com)
+## How this fork stays current
 
----
+A scheduled GitHub Actions workflow merges `Fire-Devils/FilaMan-System-ESP32`
+`main` into this branch **daily**, builds the firmware and publishes a release
+with ready-to-flash binaries. Upstream fixes therefore land here automatically;
+merge conflicts or build failures open an issue instead of silently breaking.
 
-### Now more detailed informations about the usage: [Wiki](https://github.com/ManuelW77/Filaman/wiki)
+Grab the latest binaries from the [Releases](../../releases) page:
 
-### ESP32 Hardware Features
-- **Weight Measurement:** Using a load cell with HX711 amplifier for precise weight tracking.
-- **NFC Tag Reading/Writing:** PN532 module for reading and writing filament data to NFC tags.
-- **OLED Display:** Shows current weight and connection status (WiFi, FilaMan-System).
-- **WiFi Connectivity:** WiFiManager for easy network configuration.
-- **NFC-Tag NTAG213 NTAG215:** Use NTAG213, better NTAG215 because of enough space on the Tag
+| Asset | Purpose |
+|---|---|
+| `upgrade_filaman_firmware_acepro_*.bin` | firmware update via the scale's web UI |
+| `upgrade_filaman_website_acepro_*.bin` | web UI (LittleFS) update, when needed |
+| `filaman_full_acepro_*.bin` | full image for initial flashing via USB |
 
-### Web Interface Features
-- **Real-time Updates:** WebSocket connection for live data updates.
-- **NFC Tag Management:**
-	- Write filament data to NFC tags.
-	- Supports automatic Spool detection in compatible systems.
-- **FilaMan-System Integration:**
-  - Synchronize spool data with the central backend.
-  - Update spool weights automatically.
-  - Track NFC tag assignments.
+## Hardware, setup and general documentation
 
-### If you want to support my work, i would be happy to get a coffe
+Unchanged from upstream — see the
+[original README](https://github.com/Fire-Devils/FilaMan-System-ESP32#readme)
+and the [FilaMan documentation](https://docu.filaman.app).
 
-<a href="https://www.buymeacoffee.com/manuelw" target="_blank"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me A Coffee" style="height: 30px !important;width: 108px !important;" ></a>
+## Credits
 
-## Manufacturer Tags Support
+- [ManuelW77](https://github.com/ManuelW77) / Fire-Devils — FilaMan and the
+  original firmware
+- ACE Pro hybrid tag support originally developed in
+  [Anzarion/Filaman](https://github.com/Anzarion/Filaman) (v2.x standalone
+  firmware) and ported to the v3 FilaMan-System architecture here
+- Tag format research: [DnG-Crafts/ACE-RFID](https://github.com/DnG-Crafts/ACE-RFID),
+  [Molodos/anycubic-nfc-filament](https://github.com/Molodos/anycubic-nfc-filament),
+  [mrRobot62/anycubic_filament_sku_sniffer](https://github.com/mrRobot62/anycubic_filament_sku_sniffer)
 
-🎉 **Exciting News!** FilaMan now supports **Manufacturer Tags** - NFC tags that come pre-programmed directly from filament manufacturers!
-
-### First Manufacturer Partner: RecyclingFabrik
-
-We're thrilled to announce that [**RecyclingFabrik**](https://www.recyclingfabrik.de) will be the **first filament manufacturer** to support FilaMan by offering NFC tags in the FilaMan format on their spools!
-
-**Coming Soon:** RecyclingFabrik spools will include NFC tags that automatically integrate with your FilaMan system, eliminating manual setup and ensuring perfect compatibility.
-
-### How Manufacturer Tags Work
-
-When you scan a manufacturer NFC tag for the first time:
-1. **Automatic Brand Detection:** FilaMan recognizes the manufacturer and creates the brand in the FilaMan-System.
-2. **Filament Type Creation:** All material specifications are automatically added.
-3. **Spool Registration:** Your specific spool is registered with proper weight and specifications.
-4. **Future Fast Recognition:** Subsequent scans use fast-path detection for instant weight measurement.
-
-**For detailed technical information:** [Manufacturer Tags Documentation](README_ManufacturerTags_EN.md)
-
-### Benefits for Users
-- ✅ **Zero Manual Setup** - Just scan and weigh
-- ✅ **Perfect Data Accuracy** - Manufacturer-verified specifications
-- ✅ **Instant Integration** - Seamless FilaMan-System compatibility
-- ✅ **Future-Proof** - Tags work with any FilaMan-compatible system
-
-## Detailed Functionality
-
-### ESP32 Functionality
-- **User Interactions:** The OLED display provides immediate feedback on the system status, including weight measurements and connection status.
-
-### Web Interface Functionality
-- **User Interactions:** The web interface allows users to interact with the system, configure the device, and monitor status.
-- **UI Elements:** Includes forms for registration, buttons for scale actions, and real-time status indicators.
-
-## Hardware Requirements
-
-### Components (Affiliate Links)
-- **ESP32 Development Board:** Any ESP32 variant.
-[Amazon Link](https://amzn.to/3FHea6D)
-- **HX711 5kg Load Cell Amplifier:** For weight measurement.
-[Amazon Link](https://amzn.to/4ja1KTe)
-- **OLED 0.96 Zoll I2C white/yellow Display:** 128x64 SSD1306.
-[Amazon Link](https://amzn.to/445aaa9)
-- **PN532 NFC NXP RFID-Modul V3:** For NFC tag operations.
-[Amazon Link](https://amzn.eu/d/gy9vaBX)
-- **NFC Tags NTAG213 NTAG215:** RFID Tag
-[Amazon Link](https://amzn.to/3E071xO)
-- **TTP223 Touch Sensor (optional):** For reTARE per Button/Touch
-[Amazon Link](https://amzn.to/4hTChMK)
-
-
-### Pin Configuration
-| Component          | ESP32 Pin |
-|-------------------|-----------|
-| HX711 DOUT        | 16        |
-| HX711 SCK         | 17        |
-| OLED SDA          | 21        |
-| OLED SCL          | 22        |
-| PN532 IRQ         | 32        |
-| PN532 RESET       | 33        |
-| PN532 SDA         | 21        |
-| PN532 SCL         | 22        |
-| TTP223 I/O        | 25        |
-
-**!! Make sure that the DIP switches on the PN532 are set to I2C**
-**Use the 3V pin from the ESP for the touch sensor**
-
-![Wiring](./img/Schaltplan.png)
-
-![myWiring](./img/IMG_2589.jpeg)
-![myWiring](./img/IMG_2590.jpeg)
-
-*The load cell is connected to most HX711 modules as follows:
-E+ red
-E- black
-A- white
-A+ green*
-
-## Software Dependencies
-
-### ESP32 Libraries
-- `WiFiManager`: Network configuration
-- `ESPAsyncWebServer`: Web server functionality
-- `ArduinoJson`: JSON parsing and creation
-- `Adafruit_PN532`: NFC functionality
-- `Adafruit_SSD1306`: OLED display control
-- `HX711`: Load cell communication
-
-### Installation
-
-## Prerequisites
-- **Software:**
-  - [PlatformIO](https://platformio.org/) in VS Code
-  - [FilaMan-System](https://github.com/Fire-Devils/filaman-system) instance
-- **Hardware:**
-  - ESP32 Development Board
-  - HX711 Load Cell Amplifier
-  - Load Cell (weight sensor)
-  - OLED Display (128x64 SSD1306)
-  - PN532 NFC Module
-  - Connecting wires
-
-
-### Step-by-Step Installation
-### Easy Installation
-1. **Go to [FilaMan Installer](https://www.filaman.app/installer.html)**
-
-2. **Plug you device in and push Connect button**
-
-3. **Select your Device Port and push Intall**
-
-4. **Initial Setup:**
-    - Connect to the "FilaMan" WiFi access point.
-    - Configure WiFi settings through the captive portal.
-    - Access the web interface at `http://filaman.local` or the IP address.
-
-### Compile by yourself
-1. **Clone the Repository:**
-    ```bash
-    git clone https://github.com/ManuelW77/Filaman-System-esp32.git
-    cd Filaman-System-esp32
-    ```
-2. **Install Dependencies:**
-    ```bash
-    pio lib install
-    ```
-3. **Flash the ESP32:**
-    ```bash
-    pio run --target upload
-    ```
-4. **Initial Setup:**
-    - Connect to the "FilaMan" WiFi access point.
-    - Configure WiFi settings through the captive portal.
-    - Access the web interface at `http://filaman.local` or the IP address.
-
-## Documentation
-
-### Relevant Links
-- [FilaMan-System](https://github.com/Fire-Devils/filaman-system)
-- [PlatformIO Documentation](https://docs.platformio.org/)
-
-### Tutorials and Examples
-- [PlatformIO Getting Started](https://docs.platformio.org/en/latest/tutorials/espressif32/arduino_debugging_unit_testing.html)
-- [ESP32 Web Server Tutorial](https://randomnerdtutorials.com/esp32-web-server-arduino-ide/)
-
-## License
-
-This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
-
-## Materials
-
-### Useful Resources
-- [ESP32 Official Documentation](https://docs.espressif.com/projects/esp-idf/en/latest/esp32/)
-- [Arduino Libraries](https://www.arduino.cc/en/Reference/Libraries)
-- [NFC Tag Information](https://learn.adafruit.com/adafruit-pn532-rfid-nfc/overview)
-
-### Community and Support
-- [PlatformIO Community](https://community.platformio.org/)
-- [Arduino Forum](https://forum.arduino.cc/)
-- [ESP32 Forum](https://www.esp32.com/)
-
-## Availability
-
-The code can be tested and the application can be downloaded from the [GitHub repository](https://github.com/ManuelW77/Filaman-System-esp32).
-
-### If you want to support my work, i would be happy to get a coffe
-<a href="https://www.buymeacoffee.com/manuelw" target="_blank"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me A Coffee" style="height: 30px !important;width: 108px !important;" ></a>
+Licensed under the MIT License, same as upstream.

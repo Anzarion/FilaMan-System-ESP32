@@ -10,6 +10,7 @@
 #include "api.h"
 #include "display.h"
 #include "nfc.h"
+#include "nfc_acepro.h"
 #include "scale.h"
 #include "esp_task_wdt.h"
 #include "commonFS.h"
@@ -50,6 +51,7 @@ void setup() {
 
   // NFC Reader
   startNfc();
+  loadAceProMode();  // ACE Pro hybrid mode (persistent)
 
   // Touch Sensor
   pinMode(TTP223_PIN, INPUT_PULLUP);

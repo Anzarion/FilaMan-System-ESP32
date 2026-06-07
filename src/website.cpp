@@ -4,6 +4,8 @@
 #include <ArduinoJson.h>
 #include <ESPAsyncWebServer.h>
 #include "nfc.h"
+#include "nfc_acepro.h"
+#include <Adafruit_PN532.h>
 #include "scale.h"
 #include "esp_task_wdt.h"
 #include <Update.h>
@@ -76,6 +78,19 @@ void onWsEvent(AsyncWebSocket *server, AsyncWebSocketClient *client, AwsEventTyp
                 String payloadString;
                 serializeJson(doc["payload"], payloadString);
                 startWriteJsonToTag((doc["tagType"] == "spool") ? true : false, payloadString.c_str());
+            }
+        }
+
+        else if (doc["type"] == "writeNfcTagBinary") {
+            // ACE Pro binary format write (hybrid: ACE Pro + NDEF)
+            if (doc["spoolId"].is<int>() && doc["payload"].is<JsonObject>()) {
+                String spoolId = String(doc["spoolId"].as<int>());
+                String payloadString;
+                serializeJson(doc["payload"], payloadString);
+                Serial.printf("[WebSocket] Initiating ACE Pro binary write for spool ID: %s\n", spoolId.c_str());
+                startWriteNfcTagBinary(spoolId.c_str(), payloadString.c_str());
+            } else {
+                Serial.println("[WebSocket] Invalid spoolId/payload for writeNfcTagBinary");
             }
         }
         else if (doc["type"] == "scale") {
@@ -222,10 +237,44 @@ void setupWebserver(AsyncWebServer &server) {
         }
         int locationId = doc["location_id"] | 0;
 
-        startWriteJsonToTag(hasSpoolId, payloadString.c_str(), spoolId, locationId);
+        bool wantAcePro = aceProHybridMode || (doc["format"].is<String>() && doc["format"].as<String>() == "acepro");
+        if (hasSpoolId && spoolId > 0 && wantAcePro) {
+            // Hybrid write: ACE Pro binary (pages 4-34) + OpenSpool NDEF (pages 40+)
+            Serial.printf("[RFID-Write] Hybrid ACE Pro write for spool %d\n", spoolId);
+            startWriteNfcTagBinary(String(spoolId).c_str(), payloadString.c_str());
+        } else {
+            startWriteJsonToTag(hasSpoolId, payloadString.c_str(), spoolId, locationId);
+        }
 
         // Respond immediately
         request->send(200, "application/json", "{\"success\": true, \"message\": \"Schreibvorgang wurde gestartet. Bitte Tag bereit halten...\"}");
+    });
+
+    server.on("/api/dump", HTTP_GET, [](AsyncWebServerRequest *request){
+        // DEBUG: raw tag dump, pages 0-45
+        extern Adafruit_PN532 nfc;
+        if (nfcWriteInProgress) { request->send(503, "text/plain", "busy"); return; }
+        vTaskSuspend(RfidReaderTask);
+        String out = "";
+        uint8_t uid[7]; uint8_t uidLength;
+        if (nfc.readPassiveTargetID(PN532_MIFARE_ISO14443A, uid, &uidLength, 500)) {
+            char buf[24];
+            for (uint8_t page = 0; page < 46; page++) {
+                uint8_t data[4];
+                if (nfc.ntag2xx_ReadPage(page, data)) {
+                    snprintf(buf, sizeof(buf), "%02d: %02X %02X %02X %02X\n", page, data[0], data[1], data[2], data[3]);
+                    out += buf;
+                } else { out += String(page) + ": READ FAIL\n"; }
+            }
+        } else { out = "NO TAG\n"; }
+        vTaskResume(RfidReaderTask);
+        request->send(200, "text/plain", out);
+    });
+    server.on("/api/acepro", HTTP_GET, [](AsyncWebServerRequest *request){
+        if (request->hasParam("enabled")) {
+            setAceProMode(request->getParam("enabled")->value() == "1");
+        }
+        request->send(200, "application/json", String("{\"hybrid\": ") + (aceProHybridMode ? "true" : "false") + "}");
     });
 
     server.on("/api/version", HTTP_GET, [](AsyncWebServerRequest *request){

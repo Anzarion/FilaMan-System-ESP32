@@ -1,0 +1,128 @@
+﻿name: Upstream Sync + Build
+
+on:
+  schedule:
+    - cron: '0 5 * * *'   # täglich 05:00 UTC
+  workflow_dispatch:
+    inputs:
+      force_build:
+        description: 'Force build (even without upstream changes)'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  sync-and-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: port-acepro
+          fetch-depth: 0
+
+      - name: Set git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Fetch upstream
+        id: fetch
+        run: |
+          git remote add upstream https://github.com/Fire-Devils/FilaMan-System-ESP32.git
+          git fetch upstream main
+          NEW=$(git rev-list --count HEAD..upstream/main)
+          echo "new_commits=$NEW" >> "$GITHUB_OUTPUT"
+          echo "New upstream commits: $NEW"
+
+      - name: Merge upstream
+        id: merge
+        if: steps.fetch.outputs.new_commits != '0' || inputs.force_build
+        run: |
+          set +e
+          git merge upstream/main --no-edit
+          if [ $? -ne 0 ]; then
+            CONFLICTS=$(git diff --name-only --diff-filter=U | head -30)
+            git merge --abort
+            echo "conflicts<<EOF" >> "$GITHUB_OUTPUT"
+            echo "$CONFLICTS" >> "$GITHUB_OUTPUT"
+            echo "EOF" >> "$GITHUB_OUTPUT"
+            echo "merge_failed=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "merge_failed=false" >> "$GITHUB_OUTPUT"
+
+      - name: Open issue on merge conflict
+        if: steps.merge.outputs.merge_failed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh issue create --repo "${{ github.repository }}" \
+            --title "Upstream merge conflict ($(date +%Y-%m-%d))" \
+            --body "The automatic merge of Fire-Devils/FilaMan-System-ESP32 main into port-acepro failed.
+
+          Conflicting files:
+          \`\`\`
+          ${{ steps.merge.outputs.conflicts }}
+          \`\`\`
+          Please merge manually: \`git fetch upstream && git merge upstream/main\`" || true
+          exit 1
+
+      - name: Install PlatformIO
+        if: steps.fetch.outputs.new_commits != '0' || inputs.force_build
+        run: pip install platformio esptool
+
+      - name: Build firmware
+        id: build
+        if: steps.fetch.outputs.new_commits != '0' || inputs.force_build
+        run: |
+          set +e
+          pio run -e esp32dev && pio run -t buildfs
+          if [ $? -ne 0 ]; then
+            echo "build_failed=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "build_failed=false" >> "$GITHUB_OUTPUT"
+          VERSION=$(grep '^version = ' platformio.ini | cut -d'"' -f2)
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          cd .pio/build/esp32dev
+          cp firmware.bin upgrade_filaman_firmware_acepro_v${VERSION}.bin
+          cp littlefs.bin upgrade_filaman_website_acepro_v${VERSION}.bin
+          esptool.py --chip esp32 merge_bin \
+            --fill-flash-size 4MB --flash_mode dio --flash_freq 40m --flash_size 4MB \
+            -o filaman_full_acepro_${VERSION}.bin \
+            0x1000 bootloader.bin 0x8000 partitions.bin 0x10000 firmware.bin 0x310000 littlefs.bin
+
+      - name: Open issue on build failure
+        if: steps.build.outputs.build_failed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh issue create --repo "${{ github.repository }}" \
+            --title "Build failure after upstream merge ($(date +%Y-%m-%d))" \
+            --body "The merge succeeded but the PlatformIO build fails. Details in the Actions log: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" || true
+          exit 1
+
+      - name: Push merge
+        if: steps.fetch.outputs.new_commits != '0' || inputs.force_build
+        run: git push origin port-acepro
+
+      - name: Create release
+        if: steps.fetch.outputs.new_commits != '0' || inputs.force_build
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION=${{ steps.build.outputs.version }}
+          TAG="acepro-${VERSION}-$(date +%Y%m%d-%H%M)"
+          gh release create "$TAG" --repo "${{ github.repository }}" \
+            --title "FilaMan ACE Pro ${VERSION} ($(date +%Y-%m-%d))" \
+            --notes "Automated build after upstream sync. Flash the firmware update via the scale's web interface (upgrade_filaman_firmware); update the website image (upgrade_filaman_website) if needed. Use filaman_full only for initial flashing via USB." \
+            .pio/build/esp32dev/upgrade_filaman_firmware_acepro_v${VERSION}.bin \
+            .pio/build/esp32dev/upgrade_filaman_website_acepro_v${VERSION}.bin \
+            .pio/build/esp32dev/filaman_full_acepro_${VERSION}.bin
+
+
+
+
